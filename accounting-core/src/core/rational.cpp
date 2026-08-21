@@ -3,10 +3,14 @@
 #include <stdexcept>
 #include <charconv>
 #include <sstream>
-#include <cmath>
 using namespace std;
 
 namespace ledger {
+
+const Rational Rational::NaN{0, UINT64_C(0)};
+const Rational Rational::POSINF{1, UINT64_C(0)};
+const Rational Rational::NEGINF{-1, UINT64_C(0)};
+
 namespace {
 
 template<typename T>T sign(T val) {
@@ -31,6 +35,7 @@ void reduce(int64_t &n, uint64_t &d) {
 	d /= g;
 }
 
+using wide = __int128;
 const int format_idx = ios_base::xalloc();
 
 struct ShowPos {
@@ -52,6 +57,13 @@ struct ShowPos {
 		}
 	}
 };
+bool nan_calc(Rational &lhs, Rational const &rhs) {
+	if (rhs.is_nan()) {
+		lhs = Rational::NaN;
+		return true;
+	}
+	return lhs.is_nan();
+}
 }
 
 Rational::Rational(int64_t n, uint64_t d) : _num(n), _den(d) {
@@ -75,36 +87,88 @@ partial_ordering Rational::operator<=>(Rational const& rhs) const {
     return std::partial_ordering::equivalent;
 }
 
-Rational Rational::operator+(Rational const& rhs) const {
-	if (is_nan() || rhs.is_nan()) return Rational::NAN;
-	if (is_inf() && rhs.is_inf()) return _num == rhs._num ? rhs : Rational::NAN;
+Rational& Rational::operator+=(Rational const& rhs) {
+	if (nan_calc(*this, rhs)) return *this;
+	if (is_inf() && rhs.is_inf()) {
+		if (_num != rhs._num) *this = Rational::NaN;
+		return *this;
+	}
 	if (is_inf()) return *this;
-	if (rhs.is_inf()) return rhs;
+	if (rhs.is_inf()) {
+		*this = rhs;
+		return *this;
+	}
     // a/b + c/d = (a*d + c*b) / (b*d)，然后约分
-    using wide = __int128;
 	auto g = gcd(_den, rhs._den);
     auto n = static_cast<wide>(_num) * static_cast<wide>(rhs._den/g)
            + static_cast<wide>(rhs._num) * static_cast<wide>(_den/g);
     auto d = static_cast<wide>(_den) * static_cast<wide>(rhs._den/g);
-
-    return Rational{static_cast<int64_t>(n), static_cast<int64_t>(d)};
+    _num = static_cast<int64_t>(n);
+    _den = static_cast<uint64_t>(d);
+    reduce(_num, _den);
+    return *this;
 }
 
-Rational Rational::operator*(Rational const &rhs) const {
-	if (is_nan() || rhs.is_nan()) return Rational::NAN;
-	if (is_inf()) return rhs.is_zero() ? Rational::NAN : *this;
-	if (rhs.is_inf()) return is_zero() ? Rational::NAN : rhs;
+Rational& Rational::operator-=(Rational const& rhs) {
+	if (nan_calc(*this, rhs)) return *this;
+	if (is_inf() && rhs.is_inf()) {
+		if (_num == rhs._num) *this = Rational::NaN;
+		return *this;
+	}
+	if (is_inf()) return *this;
+	if (rhs.is_inf()) {
+		*this = -rhs;
+		return *this;
+	}
+	auto g = gcd(_den, rhs._den);
+    auto n = static_cast<wide>(_num) * static_cast<wide>(rhs._den/g)
+           - static_cast<wide>(rhs._num) * static_cast<wide>(_den/g);
+    auto d = static_cast<wide>(_den) * static_cast<wide>(rhs._den/g);
+    _num = static_cast<int64_t>(n);
+    _den = static_cast<uint64_t>(d);
+    reduce(_num, _den);
+    return *this;
+}
+
+Rational& Rational::operator*=(Rational const &rhs) {
+	if (nan_calc(*this, rhs)) return *this;
+	if (is_inf()) {
+		if (rhs.is_zero()) *this = Rational::NaN;
+		return *this;
+	}
+	if (rhs.is_inf()) {
+		if (is_zero()) *this = Rational::NaN;
+		else *this = rhs;
+		return *this;
+	}
 	auto g1 = gcd(_num, rhs._den);
 	auto g2 = gcd(_den, rhs._num);
-	return Rational{(_num/g1) * (rhs._num/g2), (_den/g2) * (rhs._den/g1)};
+	_num = (_num / g1) * (rhs._num / g2);
+	_den = (_den / g2) * (rhs._den / g1);
+	reduce(_num, _den);
+	return *this;
 }
 
-Rational Rational::operator/(Rational const &rhs) const {
-	if (is_nan() || rhs.is_nan()) return Rational::NAN;
-    if (rhs.is_zero()) return Rational(_num, 0);
-    if (rhs.is_inf()) return is_inf() ? Rational::NAN : Rational();
+Rational& Rational::operator/=(Rational const &rhs) {
+	if (nan_calc(*this, rhs)) return *this;
+	if (rhs.is_zero()) {
+		_den = 0;
+		return *this;
+	}
+    if (rhs.is_inf()) {
+		if (is_inf()) {
+			*this = Rational::NaN;
+		} else {
+			*this = Rational();
+		}
+		return *this;
+	}
 	if (is_inf()) return *this;
-    return *this * Rational(rhs._den, rhs._num);
+	auto g1 = gcd(_num, rhs._num);
+	auto g2 = gcd(_den, rhs._den);
+	_num = (_num/g1) * (rhs._den/g2);
+	_den = (_den/g2) * (rhs._num/g1);
+    return *this;
 }
 
 istream &operator>>(istream &is, Rational &r) {
@@ -115,7 +179,7 @@ istream &operator>>(istream &is, Rational &r) {
 	char c = is.peek();
 	if (c == '/') {
 		is.get();
-		int64_t y;
+		uint64_t y;
 		if (is >> y) {
 			r = Rational(x, y);
 			return is;
@@ -137,7 +201,7 @@ istream &operator>>(istream &is, Rational &r) {
 		char c2 = is.peek();
 		if (c2 == '/') {
 			is.get();
-			int64_t z;
+			uint64_t z;
 			if (is >> z) {
 				r = Rational(y, z) + x;
 				return is;
@@ -150,19 +214,20 @@ istream &operator>>(istream &is, Rational &r) {
 		}
 	} else if (c == '.') {
 		is.get();
-		char c;
-		int e = 0;
+		char c2;
+		int64_t e = 0;
+		uint64_t d = 1;
 		while (true) {
-			c = is.peek();
-			if (c >= '0' && c <= '9') {
+			c2 = is.peek();
+			if (c2 >= '0' && c2 <= '9') {
 				is.get();
-				x = x * 10 + (c - '0');
+				x = x * 10 + (c2 - '0');
 				--e;
-			} else if (c == 'e' || c == 'E') {
+			} else if (c2 == 'e' || c2 == 'E') {
 				is.get();
 				int64_t exp;
 				if (!(is >> exp)) {
-					r = Rational(x, d);
+					r = Rational(x, static_cast<uint64_t>(d));
 					is.clear(is.failbit);
 					is.unget();
 					return is;
@@ -173,51 +238,37 @@ istream &operator>>(istream &is, Rational &r) {
 				break;
 			}
 		}
-		int d = 1;
 		while (e > 0) { x *= 10; --e; }
 		while (e < 0) { d *= 10; ++e; }
 		r = Rational(x, d);
 		return is;
 	}
+	r = x;
+	return is;
 }
 
 ostream &operator<<(ostream &os, Rational const &r) {
 	if (r.is_nan()) return os << "NaN";
 	if (r.is_inf()) return os << (r.is_positive_inf() ? "INF" : "-INF");
 	if (r.is_zero()) return os << "0";
-	if (r._den == 1) return os << r._num;
+	if (r._den == 1 && os.iword(format_idx) != static_cast<int>(Rational::Format::DECIMAL))
+			return os << r._num;
 	switch (os.iword(format_idx)) {
-	case static_cast<int>(Rational::Format::MIXED):
+	case static_cast<int>(Rational::Format::MIXED): {
 		auto i = r._num / r._den;
 		auto n = r._num % r._den;
 		os << i;
 		ShowPos showpos(os, true);
 		os << n << "/" << r._den;
+		break;
+	}
 	case static_cast<int>(Rational::Format::EXACT):
-		return os << r._num << "/" << r._den;
+		os << r._num << "/" << r._den;
+		break;
 	case static_cast<int>(Rational::Format::DECIMAL):
 	default:
-		auto i = r._num / r._den;
-		auto n = safe_abs(r._num % r._den);
-		auto precision = os.precision();
-		vector<char> buf;
-		buf.resize(precision + 1);
-		while (n != 0 && precision-- > 0) {
-			n *= 10;
-			buf.push_back('0' + n / r._den);
-			n %= r._den;
-		}
-		n *= 2;
-		if (n > r._den || n == r._den && buf.back() & 1) {
-			auto it = buf.rend();
-			while (it != buf.rend() && *it == '9') {
-				*it++ = '0';
-			}
-			if (it != buf.rend()) {
-				i = i + sign(i);
-			}
-		}
-		os << i << '.' << buf.data();
+		os << static_cast<long double>(static_cast<__float128>(r._num) / r._den);
+		break;
 	}
 	return os;
 }
