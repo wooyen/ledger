@@ -1,62 +1,23 @@
-#include "ledger/core/rational.hpp"
+#include <limits>
 #include <numeric>
-#include <stdexcept>
-#include <charconv>
-#include <sstream>
+#include <istream>
+#include "ledger/core/rational.hpp"
+#include "ledger/core/rational_format.hpp"
 using namespace std;
 
 namespace ledger {
 
+const Rational Rational::ZERO{};
+const Rational Rational::ONE{1};
 const Rational Rational::NaN{0, UINT64_C(0)};
 const Rational Rational::POSINF{1, UINT64_C(0)};
 const Rational Rational::NEGINF{-1, UINT64_C(0)};
 
-namespace {
-
-template<typename T>T sign(T val) {
-    return val < 0 ? T(-1) : (val == T(0) ? T(0) : T(1));
-}
-
-template<typename T> requires is_signed_v<T> make_unsigned_t<T> safe_abs(T n) {
-	return n == numeric_limits<T>::min() ? static_cast<make_unsigned_t<T>>(numeric_limits<T>::max()) + 1 : static_cast<make_unsigned_t<T>>(abs(n));
-}
-
-template<typename T> requires is_unsigned_v<T> T safe_abs(T n) {
-	return n;
-}
-
-void reduce(int64_t &n, uint64_t &d) {
-	if (d == 0) {
-		n = sign(n);
-		return;
-	}
-	auto g = gcd(safe_abs(n), d);
-	n /= static_cast<int64_t>(g);
-	d /= g;
-}
+	namespace {
 
 using wide = __int128;
 const int format_idx = ios_base::xalloc();
 
-struct ShowPos {
-	ostream &os;
-	bool was_showpos;
-	ShowPos(ostream &os, bool show = false) : os(os) {
-		was_showpos = os.flags() & ios_base::showpos;
-		if (show) {
-			os << showpos;
-		} else {
-			os << noshowpos;
-		}
-	}
-	~ShowPos() {
-		if (was_showpos) {
-			os << showpos;
-		} else {
-			os << noshowpos;
-		}
-	}
-};
 bool nan_calc(Rational &lhs, Rational const &rhs) {
 	if (rhs.is_nan()) {
 		lhs = Rational::NaN;
@@ -64,24 +25,22 @@ bool nan_calc(Rational &lhs, Rational const &rhs) {
 	}
 	return lhs.is_nan();
 }
-}
-
-Rational::Rational(int64_t n, uint64_t d) : _num(n), _den(d) {
-	reduce(_num, _den);
-}
-
-Rational::Rational(int64_t n, int64_t d) : _num(n), _den(safe_abs(d)) {
-	reduce(_num, _den);
-	if (d < 0) _num = -_num;
+	}
+void Rational::reduce() {
+	if (_den == 0) {
+		_num = __internal::sign(_num);
+		return;
+	}
+	auto g = gcd(__internal::abs(_num), _den);
+	_num /= static_cast<int64_t>(g);
+	_den /= g;
 }
 
 partial_ordering Rational::operator<=>(Rational const& rhs) const {
 	if (is_nan() || rhs.is_nan()) return std::partial_ordering::unordered;
-    // 交叉相乘比较：num/denom vs rhs.num/rhs.denom
-    // 使用 __int128 防止溢出
     using wide = __int128;
     auto lhs_val = static_cast<wide>(_num) * static_cast<wide>(rhs._den);
-    auto rhs_val = static_cast<wide>(rhs._num) * static_cast<wide>(rhs._den);
+    auto rhs_val = static_cast<wide>(rhs._num) * static_cast<wide>(_den);
     if (lhs_val < rhs_val) return std::partial_ordering::less;
     if (lhs_val > rhs_val) return std::partial_ordering::greater;
     return std::partial_ordering::equivalent;
@@ -105,7 +64,7 @@ Rational& Rational::operator+=(Rational const& rhs) {
     auto d = static_cast<wide>(_den) * static_cast<wide>(rhs._den/g);
     _num = static_cast<int64_t>(n);
     _den = static_cast<uint64_t>(d);
-    reduce(_num, _den);
+    reduce();
     return *this;
 }
 
@@ -126,7 +85,7 @@ Rational& Rational::operator-=(Rational const& rhs) {
     auto d = static_cast<wide>(_den) * static_cast<wide>(rhs._den/g);
     _num = static_cast<int64_t>(n);
     _den = static_cast<uint64_t>(d);
-    reduce(_num, _den);
+    reduce();
     return *this;
 }
 
@@ -145,7 +104,7 @@ Rational& Rational::operator*=(Rational const &rhs) {
 	auto g2 = gcd(_den, rhs._num);
 	_num = (_num / g1) * (rhs._num / g2);
 	_den = (_den / g2) * (rhs._den / g1);
-	reduce(_num, _den);
+	reduce();
 	return *this;
 }
 
@@ -171,106 +130,168 @@ Rational& Rational::operator/=(Rational const &rhs) {
     return *this;
 }
 
-istream &operator>>(istream &is, Rational &r) {
-	int64_t x;
-	if (!(is >> x)) {
-		return is;
+int parse_digit(char c, int base) {
+	int n = c - '0';
+	if (n >= 0 && n < base) return n;
+	if (base == 16) {
+		n = c >= 'a' ? c - 'a' + 10 : c - 'A' + 10;
+		if (n >= 10 && n < base) return n;
+	}
+	return -1;
+}
+
+istream &parse_decimal(istream &is, Rational &r, bool neg, int64_t x = 0) {
+	is.get();
+	int64_t e = 0;
+	uint64_t d = 1;
+	int base;
+	switch (is.flags() & ios_base::basefield) {
+	case ios_base::oct:
+		base = 8;
+		break;
+	case ios_base::hex:
+		base = 16;
+		break;
+	default:
+		base = 10;
 	}
 	char c = is.peek();
-	if (c == '/') {
+	int n = 0;
+	while ((n = parse_digit(c, base)) != -1) {
+		x = x * base + (neg ? - n : n);
+		d *= base;
 		is.get();
-		uint64_t y;
-		if (is >> y) {
-			r = Rational(x, y);
-			return is;
-		} else {
-			r = x;
-			is.clear(is.failbit);
-			is.unget();
+		c = is.peek();
+	}
+	if (c == 'e' || c == 'E' || (base == 16 && (c == 'p' || c == 'P'))) {
+		is.get();
+		c = is.peek();
+		if (c == ' ' || (c >= 9 && c < 14) || !(is >> e)) {
+			is.setstate(ios_base::failbit);
 			return is;
 		}
-	} else if (c == '+' || c == '-') {
-		is.get();
-		is.unget();
-		int64_t y;
-		if (!(is>>y)) {
-			r = x;
-			is.clear(is.failbit);
-			return is;
-		}
-		char c2 = is.peek();
-		if (c2 == '/') {
-			is.get();
-			uint64_t z;
-			if (is >> z) {
-				r = Rational(y, z) + x;
+	}
+	while (e < 0) { d *= base; ++e; }
+	while (e > 0 && d > 1) { d /= base; --e; }
+	while (e > 0) { x *= base; --e; }
+	r = Rational(x, d);
+	return is;
+}
+
+bool ensure_number_available(istream &is) {
+	is.get();
+	int c = is.peek();
+	if (!(c >= '0' && c <= '9')) {
+		is.setstate(ios_base::failbit);
+		return false;
+	}
+	return true;
+}
+
+istream &operator>>(istream &is, Rational &r) {
+	if (!istream::sentry(is)) return is;
+	int first = is.peek();
+	if (first == istream::traits_type::eof()) return is;
+	bool neg = first == '-';
+	r = Rational::ZERO;
+	if (first == '.') return parse_decimal(is, r, neg);
+	int64_t x;
+	if (!(is >> x)) {
+		is.clear();
+		array<const char *, 4> symbol{"nan", "inf", "NAN", "INF"};
+		int c2 = is.peek();
+		if (c2 == '.') return parse_decimal(is, r, neg);
+		for (int i = 0; i < 2; ++i) {
+			int j = 0;
+			for (; j < 3; ++j) {
+				if (c2 != symbol[i][j] && c2 != symbol[i + 2][j]) break;
+				is.get();
+				if (j < 2) c2 = is.peek();
+			}
+			if (j == 3) {
+				r = i == 0 ? Rational::NaN : (neg ? Rational::NEGINF : Rational::POSINF);
 				return is;
-			} else {
-				r = Rational(x + y);
-				is.clear(is.failbit);
-				is.unget();
+			} else if (j != 0) {
+				is.setstate(ios_base::failbit);
 				return is;
 			}
 		}
-	} else if (c == '.') {
-		is.get();
-		char c2;
-		int64_t e = 0;
-		uint64_t d = 1;
-		while (true) {
-			c2 = is.peek();
-			if (c2 >= '0' && c2 <= '9') {
-				is.get();
-				x = x * 10 + (c2 - '0');
-				--e;
-			} else if (c2 == 'e' || c2 == 'E') {
-				is.get();
-				int64_t exp;
-				if (!(is >> exp)) {
-					r = Rational(x, static_cast<uint64_t>(d));
-					is.clear(is.failbit);
-					is.unget();
-					return is;
-				}
-				e += exp;
-				break;
-			} else {
-				break;
-			}
-		}
-		while (e > 0) { x *= 10; --e; }
-		while (e < 0) { d *= 10; ++e; }
-		r = Rational(x, d);
+		is.setstate(ios_base::failbit);
 		return is;
+	}
+	if (is.eof()) {
+		r = x;
+		return is;
+	}
+	int delim = is.peek();
+	if (delim == '/') {
+		if (!ensure_number_available(is)) return is;
+		uint64_t y;
+		if (!(is >> y)) return is;
+		r = Rational(x, y);
+		return is;
+	} else if (delim == '&') {
+		if (!ensure_number_available(is)) return is;
+		uint64_t y;
+		if (!(is >> y)) return is;
+		if (is.peek() != '/') {
+			is.setstate(ios_base::failbit);
+			return is;
+		}
+		if (!ensure_number_available(is)) return is;
+		uint64_t z;
+		if (!(is >> z)) return is;
+		r = Rational(y, z);
+		if (neg) r = -r;
+		r += x;
+		return is;
+	} else if (delim == '.') {
+		return parse_decimal(is, r, neg, x);
 	}
 	r = x;
 	return is;
 }
 
 ostream &operator<<(ostream &os, Rational const &r) {
-	if (r.is_nan()) return os << "NaN";
-	if (r.is_inf()) return os << (r.is_positive_inf() ? "INF" : "-INF");
-	if (r.is_zero()) return os << "0";
-	if (r._den == 1 && os.iword(format_idx) != static_cast<int>(Rational::Format::DECIMAL))
-			return os << r._num;
-	switch (os.iword(format_idx)) {
-	case static_cast<int>(Rational::Format::MIXED): {
-		auto i = r._num / r._den;
-		auto n = r._num % r._den;
-		os << i;
-		ShowPos showpos(os, true);
-		os << n << "/" << r._den;
-		break;
+	Rational::Format format = static_cast<Rational::Format>(os.iword(format_idx));
+	if (format == Rational::Format::DECIMAL) {
+		if (r.is_nan()) return os << numeric_limits<long double>::quiet_NaN();
+		if (r.is_positive_inf()) return os << numeric_limits<long double>::infinity();
+		if (r.is_negative_inf()) return os << -numeric_limits<long double>::infinity();
+		return os << static_cast<long double>(static_cast<__float128>(r._num) / r._den);
+	} else if (r._den == 1) {
+		return os << r._num;
+	} else {
+		array<char, 8> spec;
+		auto pos = spec.begin();
+		*pos++ = '{';
+		*pos++ = ':';
+		*pos++ = format == Rational::Format::MIXED ? 'm' : 'f';
+		if (os.flags() & ios_base::showpos) {
+			*pos++ = '+';
+		}
+		if (os.flags() & ios_base::showbase) {
+			*pos++ = '#';
+		}
+		char type = 'd';
+		switch (os.flags() & ios_base::basefield) {
+		case ios_base::oct:
+			type = 'o';
+			break;
+		case ios_base::hex:
+			type = 'x';
+			break;
+		}
+		if (os.flags() & ios_base::uppercase) {
+			type = toupper(type);
+		}
+		if (type != 'd') {
+			*pos++ = type;
+		}
+		*pos++ = '}';
+		string_view sv(spec.data(), static_cast<size_t>(pos - spec.begin()));
+		return os << vformat(sv, make_format_args(r));
 	}
-	case static_cast<int>(Rational::Format::EXACT):
-		os << r._num << "/" << r._den;
-		break;
-	case static_cast<int>(Rational::Format::DECIMAL):
-	default:
-		os << static_cast<long double>(static_cast<__float128>(r._num) / r._den);
-		break;
-	}
-	return os;
 }
 
 ostream &decimal(ostream &os) {
@@ -287,6 +308,5 @@ ostream &exact(ostream &os) {
     os.iword(format_idx) = static_cast<int>(Rational::Format::EXACT);
     return os;
 }
-
 
 } // namespace ledger
