@@ -61,16 +61,15 @@ Uuid Uuid::from_string(string_view sv) {
 	return uuid;
 }
 
-string Uuid::to_string() const {
-	ostringstream oss;
-	oss << hex << setfill('0');
-
+string Uuid::to_string(bool upper) const {
+	string result('-', 36);
+	auto pos = result.begin();
 	for (size_t i = 0; i < 16; ++i) {
-		if (i == 4 || i == 6 || i == 8 || i == 10) oss << '-';
-		oss << setw(2) << static_cast<unsigned>(bytes[i]);
+		if (i == 4 || i == 6 || i == 8 || i == 10) ++pos;
+		*pos++ = __internal::hex_char(bytes[i] >> 4, upper);
+		*pos++ = __internal::hex_char(bytes[i] & 0x0F, upper);
 	}
-
-	return oss.str();
+	return result;
 }
 
 bool Uuid::is_null() const {
