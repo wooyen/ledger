@@ -35,7 +35,7 @@ public:
     constexpr auto parse(std::format_parse_context& ctx) {
 		auto it = ctx.begin();
 		auto end = ctx.end();
-		if (it != end) {
+		if (it != end && *it != '}') {
 			switch (*it) {
 			case 'L':
 			case 'l':
@@ -46,8 +46,8 @@ public:
 			default:
 				throw std::format_error("invalid format");
 			}
+			if (it != end && *it != '}') throw std::format_error("invalid format");
 		}
-		if (it != end && *it != '}') throw std::format_error("invalid format");
 		return it;
 	}
     auto format(const ledger::Uuid& u, std::format_context& ctx) const {
