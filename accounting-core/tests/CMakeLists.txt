@@ -5,6 +5,7 @@ include(GoogleTest)
 
 add_executable(ledger_tests
     test_rational.cpp
+    test_uuid.cpp
     # TODO: re-enable when domain model stabilizes
     # test_account_repo.cpp
     # test_balance_service.cpp
