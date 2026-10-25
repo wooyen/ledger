@@ -21,7 +21,7 @@ Uuid Uuid::generate() {
 	mt19937_64 gen(rd());
 	uniform_int_distribution<uint64_t> dist;
 	uint64_t x[2] = {dist(gen), dist(gen)};
-	memcpy(uuid.bytes, &x, sizeof(x));
+	memcpy(uuid.bytes.data(), &x, sizeof(x));
 
 	// Overwrite first 6 bytes with timestamp (big-endian)
 	auto ms = duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
@@ -62,12 +62,12 @@ Uuid Uuid::from_string(string_view sv) {
 }
 
 string Uuid::to_string(bool upper) const {
-	string result('-', 36);
+	string result(36, '-');
 	auto pos = result.begin();
 	for (size_t i = 0; i < 16; ++i) {
 		if (i == 4 || i == 6 || i == 8 || i == 10) ++pos;
-		*pos++ = __internal::hex_char(bytes[i] >> 4, upper);
-		*pos++ = __internal::hex_char(bytes[i] & 0x0F, upper);
+		*pos++ = ledger::__internal::hex_char(bytes[i] >> 4, upper);
+		*pos++ = ledger::__internal::hex_char(bytes[i] & 0x0F, upper);
 	}
 	return result;
 }
